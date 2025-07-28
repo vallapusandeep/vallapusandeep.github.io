@@ -1,0 +1,125 @@
+#include "driver/i2s.h"
+#include "driver/adc.h"
+
+#define MIC_LEFT_CHANNEL      I2S_CHANNEL_MONO
+#define I2S_SAMPLE_RATE       16000
+#define I2S_SAMPLE_BITS       I2S_BITS_PER_SAMPLE_16BIT
+#define I2S_NUM               I2S_NUM_0
+#define I2S_BCK_IO            26
+#define I2S_WS_IO             22   // ✅ Moved from 25 to 22
+#define I2S_DATA_IN_IO        33
+
+#define AMP_OUTPUT_PIN        25   // ✅ DAC output to amplifier
+#define POT_ADC_CHANNEL       ADC1_CHANNEL_3 // GPIO39
+#define MODE_PIN              34
+
+#define BUFFER_SIZE           512
+
+int threshold = 40;  // Default dB threshold
+bool attenuateMode = true;  // true = attenuate, false = amplify
+
+// Initialize I2S for microphone input
+void initI2S() {
+  i2s_config_t i2s_config = {
+    .mode = i2s_mode_t(I2S_MODE_MASTER | I2S_MODE_RX),
+    .sample_rate = I2S_SAMPLE_RATE,
+    .bits_per_sample = I2S_SAMPLE_BITS,
+    .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,
+    .communication_format = I2S_COMM_FORMAT_I2S,
+    .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
+    .dma_buf_count = 8,
+    .dma_buf_len = 64,
+    .use_apll = false
+  };
+
+  i2s_pin_config_t pin_config = {
+    .bck_io_num = I2S_BCK_IO,
+    .ws_io_num = I2S_WS_IO,
+    .data_out_num = I2S_PIN_NO_CHANGE,
+    .data_in_num = I2S_DATA_IN_IO
+  };
+
+  i2s_driver_install(I2S_NUM, &i2s_config, 0, NULL);
+  i2s_set_pin(I2S_NUM, &pin_config);
+  i2s_zero_dma_buffer(I2S_NUM);
+}
+
+// Setup ADC (driver_ng)
+void initADC() {
+  adc1_config_width(ADC_WIDTH_BIT_12);
+  adc1_config_channel_atten(POT_ADC_CHANNEL, ADC_ATTEN_DB_11);
+}
+
+// Read user-set threshold using potentiometer
+float getUserThreshold() {
+  int potValue = adc1_get_raw(POT_ADC_CHANNEL);  // 0 to 4095
+  return map(potValue, 0, 4095, 0, 80);          // dB scale
+}
+
+// Calculate peak dB from audio buffer
+float calculatePeakDb(int16_t* samples, int count) {
+  int16_t peak = 0;
+  for (int i = 0; i < count; i++) {
+    if (abs(samples[i]) > peak) peak = abs(samples[i]);
+  }
+
+  float voltage = (peak / 32768.0) * 3.3;  // Convert to voltage
+  float dB = 20.0 * log10(voltage / 0.006);  // Relative to 6mV (typical mic floor)
+  return isnan(dB) ? 0 : dB;
+}
+
+// Output audio (attenuated/amplified)
+void outputAudio(int16_t* samples, int count, bool amplify) {
+  for (int i = 0; i < count; i++) {
+    int val = samples[i];
+    if (!amplify) {
+      val = val / 3;  // Attenuate
+    } else {
+      val = constrain(val * 2, -32768, 32767);  // Amplify
+    }
+    uint8_t out = map(val, -32768, 32767, 0, 255);
+    dacWrite(AMP_OUTPUT_PIN, out);  // Write to DAC
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  initI2S();
+  initADC();
+  pinMode(MODE_PIN, INPUT_PULLUP);
+
+  dacWrite(AMP_OUTPUT_PIN, 0);  // Init DAC
+  Serial.println("Audio Filter Initialized.");
+}
+
+void loop() {
+  int16_t buffer[BUFFER_SIZE];
+  size_t bytesRead;
+
+  // Read audio
+  i2s_read(I2S_NUM, &buffer, sizeof(buffer), &bytesRead, portMAX_DELAY);
+  int sampleCount = bytesRead / sizeof(int16_t);
+
+  // Compute dB
+  float peakDb = calculatePeakDb(buffer, sampleCount);
+
+  // Check mode switch
+  if (digitalRead(MODE_PIN) == LOW) {
+    delay(300);  // Debounce
+    attenuateMode = !attenuateMode;
+    Serial.println(attenuateMode ? "Switched to Attenuate Mode" : "Switched to Amplify Mode");
+  }
+
+  // Get threshold from potentiometer
+  threshold = getUserThreshold();
+
+  // Debug print
+  Serial.printf("dB: %.2f, Threshold: %d\n", peakDb, threshold);
+
+  // Output sound based on mode
+  if ((attenuateMode && peakDb > threshold) || (!attenuateMode && peakDb < threshold)) {
+    outputAudio(buffer, sampleCount, attenuateMode ? false : true);
+  } else {
+    outputAudio(buffer, sampleCount, true);  // Pass-through
+  }
+}
