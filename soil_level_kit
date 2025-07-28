@@ -1,0 +1,70 @@
+#include <DHT.h>
+#include <SoftwareSerial.h>
+
+#define DHTPIN 2
+#define DHTTYPE DHT11
+DHT dht(DHTPIN, DHTTYPE);
+
+#define MOISTURE_PIN A0
+#define RELAY_PIN 7
+
+// Thresholds
+const int moistureThreshold = 400;    // Adjust as needed
+const float humidityThreshold = 40.0; // in %
+const float temperatureThreshold = 30.0; // in °C
+
+// NPK sensor on SoftwareSerial
+SoftwareSerial npkSerial(10, 11);  // RX, TX
+
+void setup() {
+  Serial.begin(9600);          // For communication with ESP32
+  npkSerial.begin(9600);       // For NPK sensor
+  dht.begin();
+  
+  pinMode(RELAY_PIN, OUTPUT);
+  digitalWrite(RELAY_PIN, LOW);  // Pump OFF initially
+}
+
+void loop() {
+  // Read sensors
+  int soilMoisture = analogRead(MOISTURE_PIN);
+  float humidity = dht.readHumidity();
+  float temperature = dht.readTemperature();
+
+  // Read NPK values from sensor
+  int N = 0, P = 0, K = 0;
+  getNPKValues(N, P, K);
+
+  // Control Pump
+  if (soilMoisture < moistureThreshold && humidity < humidityThreshold && temperature > temperatureThreshold) {
+    digitalWrite(RELAY_PIN, HIGH);  // Turn ON pump
+  } else {
+    digitalWrite(RELAY_PIN, LOW);   // Turn OFF pump
+  }
+
+  // Send all values to ESP32 via Serial
+  Serial.print("Moisture:"); Serial.print(soilMoisture);
+  Serial.print(",Temp:"); Serial.print(temperature);
+  Serial.print(",Humidity:"); Serial.print(humidity);
+  Serial.print(",N:"); Serial.print(N);
+  Serial.print(",P:"); Serial.print(P);
+  Serial.print(",K:"); Serial.println(K);
+
+  delay(2000);
+}
+
+void getNPKValues(int &N, int &P, int &K) {
+  byte requestData[] = { 0x01, 0x03, 0x00, 0x00, 0x00, 0x03, 0x05, 0xCB };  // Example MODBUS request
+  npkSerial.write(requestData, sizeof(requestData));
+
+  delay(100);  // Wait for sensor to respond
+
+  if (npkSerial.available() >= 11) {
+    byte response[11];
+    npkSerial.readBytes(response, 11);
+
+    N = response[3] << 8 | response[4];
+    P = response[5] << 8 | response[6];
+    K = response[7] << 8 | response[8];
+  }
+}
