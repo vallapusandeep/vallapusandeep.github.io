@@ -1,0 +1,185 @@
+#include "esp_camera.h"
+#include "FS.h"
+#include "SD_MMC.h"
+#include "TJpg_Decoder.h"
+
+// Pin definition for ESP32-CAM module (AI Thinker)
+#define PWDN_GPIO_NUM     32
+#define RESET_GPIO_NUM    -1
+#define XCLK_GPIO_NUM      0
+#define SIOD_GPIO_NUM     26
+#define SIOC_GPIO_NUM     27
+
+#define Y9_GPIO_NUM       35
+#define Y8_GPIO_NUM       34
+#define Y7_GPIO_NUM       39
+#define Y6_GPIO_NUM       36
+#define Y5_GPIO_NUM       21
+#define Y4_GPIO_NUM       19
+#define Y3_GPIO_NUM       18
+#define Y2_GPIO_NUM        5
+#define VSYNC_GPIO_NUM    25
+#define HREF_GPIO_NUM     23
+#define PCLK_GPIO_NUM     22
+
+// Global pixel buffers (use PSRAM)
+uint16_t *capturedImage;
+uint16_t *referenceImage;
+
+// Flags for decoding
+bool decodeCaptured = false;
+bool decodeReference = false;
+
+// Function to decode JPEG to our buffer
+bool jpegRenderCallback(int16_t x, int16_t y, uint16_t w, uint16_t h, uint16_t* bitmap) {
+    static int index = 0;
+    
+    if (decodeCaptured) {
+        for (int i = 0; i < w * h; i++) {
+            capturedImage[index++] = bitmap[i];
+        }
+    } else if (decodeReference) {
+        for (int i = 0; i < w * h; i++) {
+            referenceImage[index++] = bitmap[i];
+        }
+    }
+    
+    return true;
+}
+
+// Function to calculate Mean Squared Error
+float compareImages(uint16_t* img1, uint16_t* img2, int width, int height) {
+  float sumError = 0;
+  for (int i = 0; i < width * height; i++) {
+    uint8_t r1 = (img1[i] >> 11) & 0x1F;
+    uint8_t g1 = (img1[i] >> 5) & 0x3F;
+    uint8_t b1 = img1[i] & 0x1F;
+    
+    uint8_t r2 = (img2[i] >> 11) & 0x1F;
+    uint8_t g2 = (img2[i] >> 5) & 0x3F;
+    uint8_t b2 = img2[i] & 0x1F;
+    
+    int dr = r1 - r2;
+    int dg = g1 - g2;
+    int db = b1 - b2;
+
+    sumError += (dr * dr) + (dg * dg) + (db * db);
+  }
+  return sumError / (width * height);
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(2000); // Allow time for Serial Monitor
+
+  // Allocate memory in PSRAM
+  capturedImage = (uint16_t *)ps_malloc(320 * 240 * sizeof(uint16_t));
+  referenceImage = (uint16_t *)ps_malloc(320 * 240 * sizeof(uint16_t));
+  
+  if (!capturedImage || !referenceImage) {
+    Serial.println("Failed to allocate PSRAM memory!");
+    while (1); // Stop here
+  }
+  Serial.println("PSRAM allocated successfully.");
+
+  // Camera configuration
+  camera_config_t config;
+  config.ledc_channel = LEDC_CHANNEL_0;
+  config.ledc_timer   = LEDC_TIMER_0;
+  config.pin_d0       = Y2_GPIO_NUM;
+  config.pin_d1       = Y3_GPIO_NUM;
+  config.pin_d2       = Y4_GPIO_NUM;
+  config.pin_d3       = Y5_GPIO_NUM;
+  config.pin_d4       = Y6_GPIO_NUM;
+  config.pin_d5       = Y7_GPIO_NUM;
+  config.pin_d6       = Y8_GPIO_NUM;
+  config.pin_d7       = Y9_GPIO_NUM;
+  config.pin_xclk     = XCLK_GPIO_NUM;
+  config.pin_pclk     = PCLK_GPIO_NUM;
+  config.pin_vsync    = VSYNC_GPIO_NUM;
+  config.pin_href     = HREF_GPIO_NUM;
+  config.pin_sscb_sda = SIOD_GPIO_NUM;
+  config.pin_sscb_scl = SIOC_GPIO_NUM;
+  config.pin_pwdn     = PWDN_GPIO_NUM;
+  config.pin_reset    = RESET_GPIO_NUM;
+  config.xclk_freq_hz = 20000000;
+  config.pixel_format = PIXFORMAT_JPEG;
+  
+  config.frame_size = FRAMESIZE_QVGA; // 320x240
+  config.jpeg_quality = 10;
+  config.fb_count = 1;
+
+  // Initialize Camera
+  if (esp_camera_init(&config) != ESP_OK) {
+    Serial.println("Camera init failed");
+    return;
+  }
+  Serial.println("Camera init successful");
+
+  // Initialize SD card
+  if (!SD_MMC.begin()) {
+    Serial.println("SD Card Mount Failed");
+    return;
+  }
+  Serial.println("SD Card mounted successfully");
+
+  // --- NEW: Check if reference image exists ---
+  if (SD_MMC.exists("/reference.jpg")) {
+    decodeReference = true;
+    Serial.println("Decoding reference image...");
+    TJpgDec.drawSdJpg(0, 0, "/reference.jpg");
+  } else {
+    Serial.println("Reference image not found!");
+    while (1);
+  }
+
+  // Capture image on startup
+  captureAndCompare();
+}
+
+void captureAndCompare() {
+  // Capture Image
+  camera_fb_t *fb = esp_camera_fb_get();
+  if (!fb) {
+    Serial.println("Camera capture failed");
+    return;
+  }
+
+  // Save captured image to SD card
+  String filename = "/captured_" + String(millis()) + ".jpg";
+  File file = SD_MMC.open(filename.c_str(), FILE_WRITE);
+  if (!file) {
+    Serial.println("Failed to open file for writing");
+    return;
+  }
+  file.write(fb->buf, fb->len);
+  file.close();
+  esp_camera_fb_return(fb);
+  Serial.println("Captured image saved to SD card");
+
+  // Decode captured image
+  decodeCaptured = true;
+  decodeReference = false;
+  TJpgDec.drawSdJpg(0, 0, filename.c_str());
+
+  // Compare captured image with reference image
+  float mse = compareImages(capturedImage, referenceImage, 320, 240);
+  Serial.print("MSE between captured and reference image: ");
+  Serial.println(mse);
+
+  if (mse > 300) {  // You can tune this threshold based on your project
+    Serial.println("Images are DIFFERENT");
+    // Additional actions can be added here if images are different
+  } else {
+    Serial.println("Images are SIMILAR");
+    // Additional actions can be added here if images are similar
+  }
+
+  // Delay before next capture (adjust as needed)
+  delay(3000); // Wait for 5 seconds before capturing next image
+}
+
+void loop() {
+  // Continuously capture and compare images
+  captureAndCompare();
+}
