@@ -1,0 +1,98 @@
+// Sensor pins
+const int flameLeft = A0;
+const int flameRight = A1;
+const int mhSensor = A2; // MQ-2 or MQ-5
+
+// Motor control pins
+const int IN1 = 8;
+const int IN2 = 9;
+const int IN3 = 10;
+const int IN4 = 11;
+
+// Pump and CO2 valve control
+const int pumpPin = 6;
+const int co2ValvePin = 7;
+
+void setup() {
+  pinMode(flameLeft, INPUT);
+  pinMode(flameRight, INPUT);
+  pinMode(mhSensor, INPUT);
+
+  pinMode(IN1, OUTPUT);
+  pinMode(IN2, OUTPUT);
+  pinMode(IN3, OUTPUT);
+  pinMode(IN4, OUTPUT);
+
+  pinMode(pumpPin, OUTPUT);
+  pinMode(co2ValvePin, OUTPUT);
+
+  Serial.begin(9600);
+}
+
+void loop() {
+  int leftIR = analogRead(flameLeft);
+  int rightIR = analogRead(flameRight);
+  int gasValue = analogRead(mhSensor);
+
+  Serial.print("Left IR: "); Serial.print(leftIR);
+  Serial.print(" | Right IR: "); Serial.print(rightIR);
+  Serial.print(" | Gas: "); Serial.println(gasValue);
+
+  int flameThreshold = 500;  // Lower value = fire detected
+  int gasThreshold = 400;
+
+  bool fireDetected = (leftIR < flameThreshold || rightIR < flameThreshold);
+  bool gasDetected = (gasValue > gasThreshold);
+
+  if (fireDetected || gasDetected) {
+    if (leftIR < rightIR) {
+      rotateLeft();
+    } else if (rightIR < leftIR) {
+      rotateRight();
+    } else {
+      stopMotors();
+      pourWater();
+      sprayCO2();
+    }
+  } else {
+    stopMotors();
+  }
+
+  delay(300);
+}
+
+// Motor control functions
+void rotateLeft() {
+  digitalWrite(IN1, LOW);
+  digitalWrite(IN2, HIGH);
+  digitalWrite(IN3, HIGH);
+  digitalWrite(IN4, LOW);
+}
+
+void rotateRight() {
+  digitalWrite(IN1, HIGH);
+  digitalWrite(IN2, LOW);
+  digitalWrite(IN3, LOW);
+  digitalWrite(IN4, HIGH);
+}
+
+void stopMotors() {
+  digitalWrite(IN1, LOW);
+  digitalWrite(IN2, LOW);
+  digitalWrite(IN3, LOW);
+  digitalWrite(IN4, LOW);
+}
+
+// Water pump function
+void pourWater() {
+  digitalWrite(pumpPin, HIGH);
+  delay(5000); // Spray water for 5 seconds
+  digitalWrite(pumpPin, LOW);
+}
+
+// CO2 valve function
+void sprayCO2() {
+  digitalWrite(co2ValvePin, HIGH);
+  delay(3000); // Open CO2 valve for 3 seconds
+  digitalWrite(co2ValvePin, LOW);
+}
